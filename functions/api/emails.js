@@ -37,9 +37,20 @@ async function getSession(request, env) {
 }
 
 function getHeader(headers, name) {
-  const h = headers.find(x => x.name.toLowerCase() === name.toLowerCase());
-  return h ? h.value : "";
+  return headers?.find(h => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
 }
+
+const parsedMessages = fullMessages.map(msg => {
+  const headers = msg.payload?.headers || [];
+  return {
+    subject: getHeader(headers, "Subject") || "(Без темы)",
+    from: getHeader(headers, "From") || "",
+    date: getHeader(headers, "Date") || "",
+    snippet: msg.snippet || ""
+  };
+});
+
+return Response.json({ messages: parsedMessages });
 
 export async function onRequestGet(context) {
   const session = await getSession(context.request, context.env);
