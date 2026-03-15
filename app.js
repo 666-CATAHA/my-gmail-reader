@@ -59,13 +59,15 @@ async function loadEmails() {
     }
 
     el.innerHTML = data.messages.map(msg => `
-      <article class="mail-item">
-        <div class="mail-subject">${escapeHtml(msg.subject || "(Без темы)")}</div>
-        <div class="mail-from">${escapeHtml(msg.from || "")}</div>
-        <div class="mail-date">${escapeHtml(msg.date || "")}</div>
-        <div class="mail-snippet">${escapeHtml(msg.snippet || "")}</div>
-      </article>
-    `).join("");
+  <article class="mail-item">
+    <div class="mail-top">
+      <div class="mail-subject">${escapeHtml(msg.subject || "(Без темы)")}</div>
+      <div class="mail-date">${escapeHtml(msg.date || "")}</div>
+    </div>
+    <div class="mail-from">${escapeHtml(msg.from || "")}</div>
+    <div class="mail-snippet">${escapeHtml(msg.snippet || "")}</div>
+  </article>
+`).join("");
   } catch (e) {
     el.innerHTML = `<p>Ошибка загрузки писем</p>`;
   }
