@@ -43,9 +43,9 @@ function getHeader(headers, name) {
 const parsedMessages = fullMessages.map(msg => {
   const headers = msg.payload?.headers || [];
   return {
-    subject: getHeader(headers, "Subject") || "(Без темы)",
-    from: getHeader(headers, "From") || "",
-    date: getHeader(headers, "Date") || "",
+    subject: getHeader(headers, "Subject"),
+    from: getHeader(headers, "From"),
+    date: getHeader(headers, "Date"),
     snippet: msg.snippet || ""
   };
 });
