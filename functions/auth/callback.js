@@ -1,38 +1,19 @@
 async function sha256(text) {
   const data = new TextEncoder().encode(text);
   const hash = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hash))
-    .map(b => b.toString(16).padStart(2, "0"))
-    .join("");
+  return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-function parseCookies(cookieHeader) {
-  const out = {};
-  if (!cookieHeader) return out;
-  for (const part of cookieHeader.split(";")) {
-    const idx = part.indexOf("=");
-    if (idx === -1) continue;
-    const key = part.slice(0, idx).trim();
-    const val = part.slice(idx + 1).trim();
-    out[key] = val;
-  }
-  return out;
+function b64encode(obj) {
+  return btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
 }
 
 export async function onRequestGet(context) {
-  const { request, env } = context;
-  const url = new URL(request.url);
+  const url = new URL(context.request.url);
   const code = url.searchParams.get("code");
-  const state = url.searchParams.get("state");
-  const error = url.searchParams.get("error");
 
-  if (error) {
-    return new Response(`OAuth error: ${error}`, { status: 400 });
-  }
-
-  const cookies = parseCookies(request.headers.get("Cookie"));
-  if (!code || !state || cookies.oauth_state !== state) {
-    return new Response("Invalid OAuth state or missing code", { status: 400 });
+  if (!code) {
+    return new Response("Нет code от Google", { status: 400 });
   }
 
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
@@ -40,57 +21,55 @@ export async function onRequestGet(context) {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       code,
-      client_id: env.GOOGLE_CLIENT_ID,
-      client_secret: env.GOOGLE_CLIENT_SECRET,
-      redirect_uri: env.GOOGLE_REDIRECT_URI,
+      client_id: context.env.GOOGLE_CLIENT_ID,
+      client_secret: context.env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: `${url.origin}/auth/callback`,
       grant_type: "authorization_code"
     })
   });
 
   const tokenData = await tokenRes.json();
 
-  if (!tokenRes.ok || !tokenData.access_token) {
+  if (!tokenRes.ok) {
     return new Response(
-      `Token exchange failed: ${JSON.stringify(tokenData, null, 2)}`,
-      { status: 400 }
+      `Token exchange failed:\n${JSON.stringify(tokenData, null, 2)}`,
+      { status: 500, headers: { "Content-Type": "text/plain; charset=UTF-8" } }
     );
   }
 
-  const profileRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+  const profileRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
     headers: {
       Authorization: `Bearer ${tokenData.access_token}`
     }
   });
 
-  const profile = await profileRes.json();
+  const profileData = await profileRes.json();
 
-  if (!profileRes.ok || !profile.email) {
-    return new Response("Failed to fetch Google profile", { status: 400 });
+  if (!profileRes.ok) {
+    return new Response(
+      `Profile fetch failed:\n${JSON.stringify(profileData, null, 2)}`,
+      { status: 500, headers: { "Content-Type": "text/plain; charset=UTF-8" } }
+    );
   }
 
-  const sessionPayload = {
-    email: profile.email,
-    name: profile.name || "",
-    given_name: profile.given_name || "",
-    family_name: profile.family_name || "",
-    picture: profile.picture || "",
-    access_token: tokenData.access_token
+  const session = {
+    email: profileData.email || "",
+    name: profileData.name || "",
+    given_name: profileData.given_name || "",
+    family_name: profileData.family_name || "",
+    picture: profileData.picture || "",
+    access_token: tokenData.access_token || ""
   };
 
-  const sessionJson = JSON.stringify(sessionPayload);
-  const sessionB64 = btoa(unescape(encodeURIComponent(sessionJson)));
-  const sig = await sha256(sessionB64 + env.SESSION_SECRET);
+  const payload = b64encode(session);
+  const signature = await sha256(payload + context.env.SESSION_SECRET);
+  const cookieValue = `${payload}.${signature}`;
 
-  const headers = new Headers();
-  headers.append(
-    "Set-Cookie",
-    `session=${sessionB64}.${sig}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400`
-  );
-  headers.append(
-    "Set-Cookie",
-    `oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`
-  );
-  headers.set("Location", "/app.html");
-
-  return new Response(null, { status: 302, headers });
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: "/",
+      "Set-Cookie": `session=${cookieValue}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`
+    }
+  });
 }
