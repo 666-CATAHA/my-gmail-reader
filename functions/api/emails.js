@@ -1,97 +1,113 @@
-async function sha256(text) {
-  const data = new TextEncoder().encode(text);
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hash))
-    .map(b => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function parseCookies(cookieHeader) {
-  const out = {};
-  if (!cookieHeader) return out;
-  for (const part of cookieHeader.split(";")) {
-    const idx = part.indexOf("=");
-    if (idx === -1) continue;
-    const key = part.slice(0, idx).trim();
-    const val = part.slice(idx + 1).trim();
-    out[key] = val;
-  }
-  return out;
-}
-
-async function getSession(request, env) {
-  const cookies = parseCookies(request.headers.get("Cookie"));
-  const raw = cookies.session;
-  if (!raw || !raw.includes(".")) return null;
-
-  const [payloadB64, sig] = raw.split(".");
-  const expected = await sha256(payloadB64 + env.SESSION_SECRET);
-  if (sig !== expected) return null;
+export async function onRequestGet(context) {
+  const { request, env } = context;
 
   try {
-    const json = decodeURIComponent(escape(atob(payloadB64)));
-    return JSON.parse(json);
+    const cookie = request.headers.get("Cookie") || "";
+    const session = parseSession(cookie);
+
+    if (!session?.accessToken) {
+      return json({ error: "Не авторизован" }, 401);
+    }
+
+    const listRes = await fetch(
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=15",
+      {
+        headers: {
+          Authorization: `Bearer ${session.accessToken}`,
+        },
+      }
+    );
+
+    const listData = await listRes.json();
+
+    if (!listRes.ok) {
+      return json(
+        { error: listData.error?.message || "Не удалось получить список писем" },
+        listRes.status
+      );
+    }
+
+    const ids = Array.isArray(listData.messages) ? listData.messages : [];
+
+    if (ids.length === 0) {
+      return json({ messages: [] });
+    }
+
+    const fullMessages = await Promise.all(
+      ids.map(async ({ id }) => {
+        const res = await fetch(
+          "https://gmail.googleapis.com/gmail/v1/users/me/messages/" +
+            encodeURIComponent(id) +
+            "?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date",
+          {
+            headers: {
+              Authorization: `Bearer ${session.accessToken}`,
+            },
+          }
+        );
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          return {
+            subject: "(Ошибка загрузки письма)",
+            from: "",
+            date: "",
+            snippet: data.error?.message || "",
+          };
+        }
+
+        const headers = data.payload?.headers || [];
+
+        return {
+          subject: getHeaderValue(headers, "Subject") || "(Без темы)",
+          from: getHeaderValue(headers, "From") || "",
+          date: getHeaderValue(headers, "Date") || "",
+          snippet: typeof data.snippet === "string" ? data.snippet : "",
+        };
+      })
+    );
+
+    return json({ messages: fullMessages });
+  } catch (error) {
+    return json({ error: "Внутренняя ошибка сервера" }, 500);
+  }
+}
+
+function getHeaderValue(headers, name) {
+  const header = headers.find(
+    (h) => String(h?.name || "").toLowerCase() === name.toLowerCase()
+  );
+  return typeof header?.value === "string" ? header.value : "";
+}
+
+function parseSession(cookieHeader) {
+  const cookies = Object.fromEntries(
+    cookieHeader
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const eqIndex = part.indexOf("=");
+        if (eqIndex === -1) return [part, ""];
+        return [part.slice(0, eqIndex), decodeURIComponent(part.slice(eqIndex + 1))];
+      })
+  );
+
+  if (!cookies.session) return null;
+
+  try {
+    return JSON.parse(cookies.session);
   } catch {
     return null;
   }
 }
 
-function getHeader(headers, name) {
-  return headers?.find(h => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
-}
-
-const parsedMessages = fullMessages.map(msg => {
-  const headers = msg.payload?.headers || [];
-  return {
-    subject: getHeader(headers, "Subject"),
-    from: getHeader(headers, "From"),
-    date: getHeader(headers, "Date"),
-    snippet: msg.snippet || ""
-  };
-});
-
-return Response.json({ messages: parsedMessages });
-
-export async function onRequestGet(context) {
-  const session = await getSession(context.request, context.env);
-  if (!session?.access_token) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const listRes = await fetch(
-    "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
-    {
-      headers: {
-        Authorization: `Bearer ${session.access_token}`
-      }
-    }
-  );
-
-  const listData = await listRes.json();
-  if (!listRes.ok) {
-    return Response.json(listData, { status: listRes.status });
-  }
-
-  const messages = [];
-  for (const item of listData.messages || []) {
-    const msgRes = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${item.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`,
-      {
-        headers: {
-          Authorization: `Bearer ${session.access_token}`
-        }
-      }
-    );
-
-    const msg = await msgRes.json();
-    if (!msgRes.ok) continue;
-
-    const headers = msg.payload?.headers || [];
-    messages.push({
-  subject: headers.find(h => h.name === "Subject")?.value || "",
-  from: headers.find(h => h.name === "From")?.value || "",
-  date: headers.find(h => h.name === "Date")?.value || "",
-  snippet: msg.snippet || ""
-});
-  return Response.json({ messages });
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=UTF-8",
+    },
+  });
 }
